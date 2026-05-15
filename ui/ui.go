@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"math/rand"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
 	"deckbuilder/combat"
+	"deckbuilder/enemies"
 	"deckbuilder/runes"
 )
 
@@ -90,7 +92,19 @@ var (
 	frostCol    = color.RGBA{120, 200, 255, 255}
 	physicalCol = color.RGBA{230, 230, 230, 255}
 	minionCol   = color.RGBA{120, 220, 160, 255}
-	wallCol        = color.RGBA{170, 160, 140, 255}
+	cardBorderCol  = color.RGBA{18, 16, 26, 255}
+	titleBarCol    = color.RGBA{32, 28, 44, 255}
+	titleSepCol    = color.RGBA{80, 70, 100, 255}
+	glyphGoldCol   = color.RGBA{200, 170, 90, 255}
+	glyphSilverCol = color.RGBA{170, 175, 190, 255}
+	glyphTextCol   = color.RGBA{30, 25, 15, 255}
+	costGemCol     = color.RGBA{90, 110, 200, 255}
+	descFgCol      = color.RGBA{210, 200, 230, 255}
+
+	wallCol         = color.RGBA{170, 160, 140, 255}
+	wallOuterCol    = color.RGBA{60, 55, 48, 255}
+	wallHighlightCol = color.RGBA{210, 200, 180, 230}
+	wallCrackCol    = color.RGBA{30, 25, 22, 230}
 	slowCol        = color.RGBA{240, 200, 90, 255}
 	rangeRingCol   = color.RGBA{180, 130, 220, 110}
 	rangeTargetCol = color.RGBA{255, 200, 130, 220}
@@ -130,6 +144,116 @@ func logKindColor(k combat.LogKind) color.RGBA {
 	}
 }
 
+// cardKind selects layout-density preset for drawCardFrame.
+type cardKind int
+
+const (
+	cardKindHand cardKind = iota
+	cardKindStage
+	cardKindReward
+)
+
+// drawCardFrame paints a structured rune card: outer dark border, title bar
+// with a glyph disc (gold for Core, silver for Modifier) and cost gem, then a
+// body area sized to the kind. bg is the inner panel fill; border is the
+// outer ring color (lets the caller mark Slow runes with a colored border).
+func drawCardFrame(screen *ebiten.Image, card runes.Card, x, y, w, h int, bg, border color.RGBA, kind cardKind) {
+	var titleH, glyphR, lineH, maxLines, pad int
+	var nameFace, descFace, glyphFace fontFace
+	switch kind {
+	case cardKindStage:
+		titleH, glyphR, pad = 22, 7, 6
+		nameFace, descFace, glyphFace = faceSmall, faceSmall, faceBody
+		maxLines = 0
+	case cardKindReward:
+		titleH, glyphR, pad = 40, 16, 10
+		nameFace, descFace, glyphFace = faceBody, faceSmall, faceTitle
+		lineH = 16
+		maxLines = 20
+	default: // cardKindHand
+		titleH, glyphR, pad = 22, 8, 6
+		nameFace, descFace, glyphFace = faceSmall, faceSmall, faceBody
+		lineH = 14
+		maxLines = 5
+	}
+
+	// Outer border.
+	vector.DrawFilledRect(screen, float32(x-1), float32(y-1), float32(w+2), float32(h+2), border, true)
+	// Body fill.
+	vector.DrawFilledRect(screen, float32(x), float32(y), float32(w), float32(h), bg, true)
+	// Title bar.
+	vector.DrawFilledRect(screen, float32(x), float32(y), float32(w), float32(titleH), titleBarCol, true)
+	vector.StrokeLine(screen, float32(x), float32(y+titleH), float32(x+w), float32(y+titleH), 1, titleSepCol, true)
+
+	// Glyph disc, gold for Core, silver for Modifier.
+	glyphFill := glyphGoldCol
+	if card.Role == runes.RoleModifier {
+		glyphFill = glyphSilverCol
+	}
+	gcx := x + pad + glyphR
+	gcy := y + titleH/2
+	vector.DrawFilledCircle(screen, float32(gcx), float32(gcy), float32(glyphR), glyphFill, true)
+	// Outline ring on the glyph disc for separation.
+	vector.StrokeCircle(screen, float32(gcx), float32(gcy), float32(glyphR), 1, cardBorderCol, true)
+	centerText(screen, card.Glyph, gcx-glyphR, gcy-glyphFace.ascent/2, glyphR*2, glyphFace, glyphTextCol)
+
+	// Cost gem.
+	costR := glyphR
+	ccx := x + w - pad - costR
+	ccy := y + titleH/2
+	vector.DrawFilledCircle(screen, float32(ccx), float32(ccy), float32(costR), costGemCol, true)
+	vector.StrokeCircle(screen, float32(ccx), float32(ccy), float32(costR), 1, cardBorderCol, true)
+	centerText(screen, fmt.Sprintf("%d", card.Cost), ccx-costR, ccy-nameFace.ascent/2, costR*2, nameFace, white)
+
+	// Name centered between glyph and cost.
+	nameX := gcx + glyphR + 4
+	nameW := ccx - costR - 4 - nameX
+	if nameW > 0 {
+		centerText(screen, truncateToWidth(card.Name, nameFace, nameW), nameX, y+titleH/2-nameFace.ascent/2, nameW, nameFace, white)
+	}
+
+	// Body description (skipped for the compact stage layout).
+	if maxLines > 0 {
+		descX := x + pad
+		descY := y + titleH + pad
+		descW := w - 2*pad
+		lines := wrapText(card.Description, float64(descW), descFace)
+		if len(lines) > maxLines {
+			lines = lines[:maxLines]
+			lines[maxLines-1] = truncateToWidth(lines[maxLines-1]+"…", descFace, descW)
+		}
+		for i, line := range lines {
+			drawText(screen, line, descX, descY+i*lineH, descFace, descFgCol)
+		}
+	}
+
+	// Footer tags.
+	footY := y + h - 18
+	if card.Slow {
+		drawText(screen, "slow", x+pad, footY, faceSmall, slowCol)
+	}
+	if card.Range > 0 {
+		rstr := fmt.Sprintf("range %.0f", card.Range)
+		rW := int(textWidth(rstr, faceSmall))
+		drawText(screen, rstr, x+w-pad-rW, footY, faceSmall, rangeRingCol)
+	}
+}
+
+// truncateToWidth returns s shortened with an ellipsis until it fits maxW.
+func truncateToWidth(s string, ff fontFace, maxW int) string {
+	if textWidth(s, ff) <= float64(maxW) {
+		return s
+	}
+	const ell = "…"
+	for len(s) > 0 {
+		s = s[:len(s)-1]
+		if textWidth(s+ell, ff) <= float64(maxW) {
+			return s + ell
+		}
+	}
+	return ell
+}
+
 func damageTypeColor(t runes.DamageType) color.RGBA {
 	switch t {
 	case runes.Fire:
@@ -163,6 +287,9 @@ func DrawRun(screen *ebiten.Image, v RunView) {
 func drawCombatScreen(screen *ebiten.Image, v RunView) {
 	c := v.Combat
 	drawRadar(screen, c)
+	drawBeams(screen, c)
+	drawCastPulse(screen, c)
+	drawParticles(screen, c)
 	drawRangePreview(screen, c)
 	drawPopups(screen, c)
 	drawPlacementPreview(screen, c)
@@ -326,17 +453,11 @@ func drawStage(screen *ebiten.Image, c *combat.Combat) {
 		x := StageStartX + i*(StageCardW+StageGap)
 		y := StageY
 		vector.DrawFilledRect(screen, float32(x), float32(y), StageCardW, StageCardH, cardBg, true)
-		edge := tooltipEdge
+		border := cardBorderCol
 		if sc.Card.Slow {
-			edge = slowCol
+			border = slowCol
 		}
-		vector.StrokeRect(screen, float32(x), float32(y), StageCardW, StageCardH, 1, edge, true)
-		drawText(screen, sc.Card.Glyph, x+8, y+6, faceBody, white)
-		drawText(screen, sc.Card.Name, x+8, y+24, faceSmall, white)
-		drawText(screen, fmt.Sprintf("Cost: %d", sc.Card.Cost), x+8, y+StageCardH-20, faceSmall, white)
-		if sc.Card.Slow {
-			drawColoredText(screen, "slow", x+StageCardW-36, y+StageCardH-20, slowCol, 1)
-		}
+		drawCardFrame(screen, sc.Card, x, y, StageCardW, StageCardH, cardBg, border, cardKindStage)
 	}
 	if !c.SpellCast && len(c.Stage) > 0 {
 		total := 0
@@ -392,6 +513,77 @@ func drawColoredText(screen *ebiten.Image, s string, x, y int, c color.RGBA, alp
 	drawText(screen, s, x, y, faceSmall, clr)
 }
 
+// drawBeams renders short-lived spell impact beams in world space, faded by
+// remaining life. Drawn over the dungeon floor but under entities.
+func drawBeams(screen *ebiten.Image, c *combat.Combat) {
+	if len(c.Beams) == 0 {
+		return
+	}
+	playerDX, playerDY := c.PlayerDisplayPos()
+	sx, sy := c.ViewShake()
+	for _, b := range c.Beams {
+		t := b.Life / b.MaxLife
+		if t > 1 {
+			t = 1
+		} else if t < 0 {
+			continue
+		}
+		a := uint8(200 * t)
+		col := color.RGBA{b.R, b.G, b.B, a}
+		x1 := float32(float64(RadarCX) + (b.X1 - playerDX) + sx)
+		y1 := float32(float64(RadarCY) + (b.Y1 - playerDY) + sy)
+		x2 := float32(float64(RadarCX) + (b.X2 - playerDX) + sx)
+		y2 := float32(float64(RadarCY) + (b.Y2 - playerDY) + sy)
+		// Outer thicker faded line + brighter thin core.
+		vector.StrokeLine(screen, x1, y1, x2, y2, 4, color.RGBA{b.R, b.G, b.B, a / 3}, true)
+		vector.StrokeLine(screen, x1, y1, x2, y2, 1.5, col, true)
+	}
+}
+
+// drawCastPulse renders the expanding ring around the player when a spell is
+// cast or a dash is performed. Decays linearly over CastPulseDuration.
+func drawCastPulse(screen *ebiten.Image, c *combat.Combat) {
+	if c.CastPulseTimer <= 0 {
+		return
+	}
+	p := 1 - c.CastPulseTimer/combat.CastPulseDuration // 0 → fresh, 1 → done
+	if p < 0 {
+		p = 0
+	} else if p > 1 {
+		p = 1
+	}
+	radius := float32(10 + p*60)
+	a := uint8(220 * (1 - p))
+	col := color.RGBA{c.CastPulseR, c.CastPulseG, c.CastPulseB, a}
+	sx, sy := c.ViewShake()
+	pcx := float32(RadarCX) + float32(sx)
+	pcy := float32(RadarCY) + float32(sy)
+	vector.StrokeCircle(screen, pcx, pcy, radius, 2, col, true)
+}
+
+// drawParticles renders the active particle bursts at world-space positions,
+// translated through the lerped player offset and current view shake.
+func drawParticles(screen *ebiten.Image, c *combat.Combat) {
+	if len(c.Particles) == 0 {
+		return
+	}
+	playerDX, playerDY := c.PlayerDisplayPos()
+	sx, sy := c.ViewShake()
+	for _, p := range c.Particles {
+		t := p.Life / p.MaxLife
+		if t > 1 {
+			t = 1
+		} else if t < 0 {
+			t = 0
+		}
+		a := uint8(255 * t)
+		col := color.RGBA{p.R, p.G, p.B, a}
+		x := float32(float64(RadarCX) + (p.X - playerDX) + sx)
+		y := float32(float64(RadarCY) + (p.Y - playerDY) + sy)
+		vector.DrawFilledCircle(screen, x, y, p.Size, col, true)
+	}
+}
+
 func drawPopups(screen *ebiten.Image, c *combat.Combat) {
 	playerDX, playerDY := c.PlayerDisplayPos()
 	sx, sy := c.ViewShake()
@@ -414,7 +606,7 @@ func drawRadar(screen *ebiten.Image, c *combat.Combat) {
 	shakeY := float32(sy)
 	playerDX, playerDY := c.PlayerDisplayPos()
 
-	vector.DrawFilledCircle(screen, RadarCX, RadarCY, RadarRadius, radarColor, true)
+	drawDungeonFloor(screen)
 	for _, r := range []float32{RadarRadius * 0.33, RadarRadius * 0.66, RadarRadius} {
 		vector.StrokeCircle(screen, RadarCX, RadarCY, r, 1, radarRing, true)
 	}
@@ -441,7 +633,31 @@ func drawRadar(screen *ebiten.Image, c *combat.Combat) {
 		y1 := float32(RadarCY+(w.Y1-playerDY)) + shakeY
 		x2 := float32(RadarCX+(w.X2-playerDX)) + shakeX
 		y2 := float32(RadarCY+(w.Y2-playerDY)) + shakeY
+		// Layered stone: dark outer band, lighter stone body, thin highlight.
+		vector.StrokeLine(screen, x1, y1, x2, y2, 8, wallOuterCol, true)
 		vector.StrokeLine(screen, x1, y1, x2, y2, 5, wallCol, true)
+		vector.StrokeLine(screen, x1, y1, x2, y2, 1.5, wallHighlightCol, true)
+		// Cracks proportional to damage taken.
+		hpFrac := float64(w.HP) / float64(w.MaxHP)
+		cracks := int((1 - hpFrac) * 6)
+		if cracks > 0 {
+			dx := float64(x2 - x1)
+			dy := float64(y2 - y1)
+			L := math.Hypot(dx, dy)
+			if L > 0 {
+				px := -dy / L * 4
+				py := dx / L * 4
+				for i := 0; i < cracks; i++ {
+					t := (float64(i) + 0.5) / 6
+					cx := float64(x1) + dx*t
+					cy := float64(y1) + dy*t
+					vector.StrokeLine(screen,
+						float32(cx-px), float32(cy-py),
+						float32(cx+px), float32(cy+py),
+						1, wallCrackCol, true)
+				}
+			}
+		}
 		mx := int((x1 + x2) / 2)
 		my := int((y1 + y2) / 2)
 		drawText(screen, fmt.Sprintf("wall %d/%d", w.HP, w.MaxHP), mx-24, my-18, faceSmall, wallCol)
@@ -470,7 +686,7 @@ func drawRadar(screen *ebiten.Image, c *combat.Combat) {
 		case !inConePreview(c, e.X, e.Y):
 			col = enemyOutOfConeCol
 		}
-		vector.DrawFilledCircle(screen, ex, ey, 10, col, true)
+		drawEnemySilhouette(screen, e, ex, ey, col)
 		label := fmt.Sprintf("%s %d/%d", e.Name, e.HP, e.MaxHP)
 		drawText(screen, label, int(ex)-30, int(ey)+14, faceSmall, col)
 		if e.HP > 0 && e.Intent != "" {
@@ -491,6 +707,93 @@ func drawRadar(screen *ebiten.Image, c *combat.Combat) {
 		vector.DrawFilledCircle(screen, mx, my, 7, minionDrawCol, true)
 		label := fmt.Sprintf("M %d/%d  (%d/t)", m.HP, m.MaxHP, m.AttackPower)
 		drawText(screen, label, int(mx)-32, int(my)+10, faceSmall, minionCol)
+	}
+}
+
+// --- Dungeon background ---
+
+var dungeonBg *ebiten.Image
+
+// ensureDungeonBg builds a pre-rendered radar-floor texture on first call:
+// the base radar disc, sprinkled with darker stone speckles and a few thin
+// rune-crack scratches. Deterministic via a fixed RNG seed so it doesn't
+// shimmer between launches.
+func ensureDungeonBg() {
+	if dungeonBg != nil {
+		return
+	}
+	size := RadarRadius * 2
+	dungeonBg = ebiten.NewImage(size, size)
+	center := float32(RadarRadius)
+	vector.DrawFilledCircle(dungeonBg, center, center, float32(RadarRadius), radarColor, true)
+
+	rng := rand.New(rand.NewSource(42))
+	stoneCol := color.RGBA{25, 28, 42, 255}
+	for i := 0; i < 110; i++ {
+		// uniform sampling inside the disc: sqrt(rand) for radius
+		r := math.Sqrt(rng.Float64()) * float64(RadarRadius-4)
+		a := rng.Float64() * math.Pi * 2
+		px := float32(float64(RadarRadius) + r*math.Cos(a))
+		py := float32(float64(RadarRadius) + r*math.Sin(a))
+		s := float32(rng.Float64()*1.5 + 0.5)
+		vector.DrawFilledCircle(dungeonBg, px, py, s, stoneCol, true)
+	}
+	crackCol := color.RGBA{32, 36, 52, 255}
+	for i := 0; i < 14; i++ {
+		r := math.Sqrt(rng.Float64()) * float64(RadarRadius-20)
+		a := rng.Float64() * math.Pi * 2
+		cx := float64(RadarRadius) + r*math.Cos(a)
+		cy := float64(RadarRadius) + r*math.Sin(a)
+		length := rng.Float64()*14 + 6
+		ca := rng.Float64() * math.Pi * 2
+		ex := cx + math.Cos(ca)*length
+		ey := cy + math.Sin(ca)*length
+		vector.StrokeLine(dungeonBg, float32(cx), float32(cy), float32(ex), float32(ey), 1, crackCol, true)
+	}
+}
+
+// drawDungeonFloor draws the pre-rendered dungeon texture at the radar
+// position. Replaces the flat-filled circle that used to sit there.
+func drawDungeonFloor(screen *ebiten.Image) {
+	ensureDungeonBg()
+	op := &ebiten.DrawImageOptions{}
+	op.GeoM.Translate(float64(RadarCX-RadarRadius), float64(RadarCY-RadarRadius))
+	screen.DrawImage(dungeonBg, op)
+}
+
+// drawEnemySilhouette renders a small distinctive shape per enemy type.
+// Without external sprites, this just composes 2-4 vector primitives —
+// enough to read "this is a Goblin vs a Wraith vs a Troll" at a glance.
+// When the enemy is dead, we collapse to a single grey blob.
+func drawEnemySilhouette(screen *ebiten.Image, e *enemies.Enemy, ex, ey float32, col color.RGBA) {
+	if e.HP <= 0 {
+		vector.DrawFilledCircle(screen, ex, ey, 9, col, true)
+		return
+	}
+	eyeCol := color.RGBA{40, 10, 10, 255}
+	switch e.Name {
+	case "Goblin":
+		vector.DrawFilledCircle(screen, ex, ey, 9, col, true)
+		vector.DrawFilledCircle(screen, ex-3, ey-2, 1.4, eyeCol, true)
+		vector.DrawFilledCircle(screen, ex+3, ey-2, 1.4, eyeCol, true)
+	case "Wraith":
+		// Outer haze, semi-transparent body, bright inner core.
+		haze := color.RGBA{col.R, col.G, col.B, 70}
+		bodyHi := color.RGBA{col.R, col.G, col.B, 200}
+		coreCol := color.RGBA{255, 220, 230, 200}
+		vector.DrawFilledCircle(screen, ex, ey, 14, haze, true)
+		vector.DrawFilledCircle(screen, ex, ey, 11, bodyHi, true)
+		vector.DrawFilledCircle(screen, ex, ey, 5, coreCol, true)
+	case "Troll":
+		// Bigger body with two horn dots and eyes.
+		hornCol := color.RGBA{170, 140, 90, 255}
+		vector.DrawFilledCircle(screen, ex, ey, 14, col, true)
+		vector.DrawFilledCircle(screen, ex-7, ey-11, 3, hornCol, true)
+		vector.DrawFilledCircle(screen, ex+7, ey-11, 3, hornCol, true)
+		vector.DrawFilledCircle(screen, ex-4, ey-2, 1.6, eyeCol, true)
+		vector.DrawFilledCircle(screen, ex+4, ey-2, 1.6, eyeCol, true)
+	default:
+		vector.DrawFilledCircle(screen, ex, ey, 10, col, true)
 	}
 }
 
@@ -556,20 +859,19 @@ func drawHand(screen *ebiten.Image, c *combat.Combat) {
 		x, y := cardRect(i)
 		playable, _ := cardPlayable(c, card)
 		bg := cardBg
+		border := cardBorderCol
 		if i == c.PendingCardIdx {
 			bg = cardBgHi
+			border = slowCol
 		} else if !playable {
 			bg = cardBgDim
 		} else if mx >= x && mx < x+CardW && my >= y && my < y+CardH {
 			bg = cardBgHi
 		}
-		vector.DrawFilledRect(screen, float32(x), float32(y), CardW, CardH, bg, true)
-		drawText(screen, card.Glyph, x+8, y+6, faceBody, white)
-		drawText(screen, card.Name, x+8, y+24, faceSmall, white)
-		drawText(screen, fmt.Sprintf("Cost: %d", card.Cost), x+8, y+CardH-22, faceSmall, white)
 		if card.Slow {
-			drawColoredText(screen, "slow", x+CardW-36, y+CardH-22, slowCol, 1)
+			border = slowCol
 		}
+		drawCardFrame(screen, card, x, y, CardW, CardH, bg, border, cardKindHand)
 	}
 }
 
@@ -751,13 +1053,11 @@ func drawRewardOverlay(screen *ebiten.Image, v RunView) {
 		if hovered {
 			bg = cardBgHi
 		}
-		vector.DrawFilledRect(screen, float32(x), float32(y), RewardCardW, RewardCardH, bg, true)
-		vector.StrokeRect(screen, float32(x), float32(y), RewardCardW, RewardCardH, 1, tooltipEdge, true)
-
-		drawText(screen, card.Glyph, x+12, y+12, faceBody, white)
-		drawText(screen, card.Name, x+12, y+34, faceBody, white)
-		drawText(screen, fmt.Sprintf("Cost: %d", card.Cost), x+12, y+58, faceSmall, white)
-		drawWrapped(screen, card.Description, x+12, y+82, float64(RewardCardW-24), 18, faceSmall, white)
+		border := cardBorderCol
+		if card.Slow {
+			border = slowCol
+		}
+		drawCardFrame(screen, card, x, y, RewardCardW, RewardCardH, bg, border, cardKindReward)
 	}
 
 	sx, sy := skipBtnRect()
