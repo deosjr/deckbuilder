@@ -561,6 +561,7 @@ func (c *Combat) MoveTowards(dx, dy float64) float64 {
 	c.MovementBudget -= step
 	if step > 0 {
 		c.hasMoved = true
+		c.refreshIntents()
 	}
 	return step
 }
