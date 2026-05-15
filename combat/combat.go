@@ -45,6 +45,8 @@ type Minion struct {
 	HP, MaxHP   int
 	X, Y        float64
 	AttackPower int
+
+	HitTimer float64 // seconds remaining in damage flash
 }
 
 // Wall is an impassable line segment in world coordinates with HP. Enemies
@@ -59,9 +61,20 @@ type Wall struct {
 // angle (radians, standard math: 0 = +X axis, increasing counter-clockwise).
 // Targeting helpers filter to enemies within ConeHalfAngle of the facing.
 type Player struct {
-	X, Y   float64
-	Facing float64
+	X, Y         float64
+	Facing       float64
+	PrevX, PrevY float64
+	TweenTimer   float64 // seconds remaining in player movement tween
 }
+
+// Visual timing constants.
+const (
+	TweenDuration    = 0.25 // movement tween duration in seconds
+	HitFlashDuration = 0.18 // damage flash duration in seconds
+	ShakeDuration    = 0.30 // screen-shake duration in seconds
+	ShakeIntensity   = 4.0  // peak shake amplitude in pixels
+	HeavyHitThresh   = 8    // player damage at or above this triggers shake
+)
 
 // ConeHalfAngle is the half-angle of the player's targeting cone in radians.
 // Total cone width = 2 × ConeHalfAngle.
@@ -130,6 +143,10 @@ type Combat struct {
 	actor string // name of the entity currently producing log entries
 
 	Popups []DamagePopup
+
+	// Visual feedback state. Read by UI, advanced in Update.
+	PlayerHitTimer float64
+	ShakeTimer     float64
 
 	// PendingCardIdx is the hand index of a card awaiting placement target.
 	// -1 when no card is pending. While >= 0, other input is blocked.
@@ -284,6 +301,7 @@ func (c *Combat) runMinionPrograms() {
 		if target.HP < 0 {
 			target.HP = 0
 		}
+		target.HitTimer = HitFlashDuration
 		c.Popups = append(c.Popups, DamagePopup{
 			X: target.X, Y: target.Y, Amount: dealt, Type: runes.Physical,
 		})
@@ -556,8 +574,7 @@ func (c *Combat) MoveTowards(dx, dy float64) float64 {
 		ty = c.Player.Y + ndy*k
 		step = nd - 1.5
 	}
-	c.Player.X = tx
-	c.Player.Y = ty
+	c.animatePlayerMove(tx, ty)
 	c.MovementBudget -= step
 	if step > 0 {
 		c.hasMoved = true
@@ -637,6 +654,7 @@ func (c *Combat) EndTurn() {
 // Update advances the enemy phase animation. dt is seconds.
 func (c *Combat) Update(dt float64) {
 	c.advancePopups(dt)
+	c.advanceVisualTimers(dt)
 	if c.Phase != PhaseEnemy {
 		return
 	}
@@ -723,6 +741,7 @@ func (c *Combat) runEnemyProgram(e *enemies.Enemy) {
 			if t.minion.HP < 0 {
 				t.minion.HP = 0
 			}
+			t.minion.HitTimer = HitFlashDuration
 			c.Popups = append(c.Popups, DamagePopup{
 				X: t.x, Y: t.y, Amount: dmg, Type: dt,
 			})
@@ -744,8 +763,7 @@ func (c *Combat) runEnemyProgram(e *enemies.Enemy) {
 			return
 		}
 		s := math.Min(step, n)
-		e.X += dx / n * s
-		e.Y += dy / n * s
+		c.animateEnemyMove(e, e.X+dx/n*s, e.Y+dy/n*s)
 	}
 
 	// Turn options, in priority order:
@@ -767,7 +785,7 @@ func (c *Combat) runEnemyProgram(e *enemies.Enemy) {
 	}
 
 	if ok, nx, ny := c.enemyCanMoveThenAct(e, t); ok {
-		e.X, e.Y = nx, ny
+		c.animateEnemyMove(e, nx, ny)
 		if e.RangedPower > 0 {
 			apply(e.RangedPower, e.RangedType)
 			e.Intent = "move + cast"
@@ -801,6 +819,7 @@ func (c *Combat) runEnemyProgram(e *enemies.Enemy) {
 			})
 			if blocker.HP == 0 {
 				c.addLog(LogEnemy, "%s shatters a wall", e.Name)
+				c.ShakeTimer = ShakeDuration
 			} else {
 				c.addLog(LogEnemy, "%s strikes wall for %d (%d/%d)", e.Name, e.AttackPower, blocker.HP, blocker.MaxHP)
 			}
@@ -1005,6 +1024,10 @@ func (c *Combat) nearestLiving() *enemies.Enemy {
 }
 
 func (c *Combat) applyDamageToPlayer(amount int) {
+	c.PlayerHitTimer = HitFlashDuration
+	if amount >= HeavyHitThresh {
+		c.ShakeTimer = ShakeDuration
+	}
 	if c.PlayerArmor >= amount {
 		c.PlayerArmor -= amount
 		return
@@ -1111,6 +1134,7 @@ func (c *Combat) DamageNearest(amount int, dt runes.DamageType, maxRange float64
 	if target.HP < 0 {
 		target.HP = 0
 	}
+	target.HitTimer = HitFlashDuration
 	c.Popups = append(c.Popups, DamagePopup{
 		X: target.X, Y: target.Y, Amount: dealt, Type: dt,
 	})
@@ -1130,6 +1154,102 @@ func (c *Combat) actorOr(fallback string) string {
 		return fallback
 	}
 	return c.actor
+}
+
+// advanceVisualTimers ticks every visual-only timer (move tweens, damage
+// flashes, shake) down toward 0. Pure rendering concern; gameplay logic does
+// not read these values.
+func (c *Combat) advanceVisualTimers(dt float64) {
+	for _, e := range c.Enemies {
+		if e.TweenTimer > 0 {
+			e.TweenTimer -= dt
+			if e.TweenTimer < 0 {
+				e.TweenTimer = 0
+			}
+		}
+		if e.HitTimer > 0 {
+			e.HitTimer -= dt
+			if e.HitTimer < 0 {
+				e.HitTimer = 0
+			}
+		}
+	}
+	for _, m := range c.Minions {
+		if m.HitTimer > 0 {
+			m.HitTimer -= dt
+			if m.HitTimer < 0 {
+				m.HitTimer = 0
+			}
+		}
+	}
+	if c.Player.TweenTimer > 0 {
+		c.Player.TweenTimer -= dt
+		if c.Player.TweenTimer < 0 {
+			c.Player.TweenTimer = 0
+		}
+	}
+	if c.PlayerHitTimer > 0 {
+		c.PlayerHitTimer -= dt
+		if c.PlayerHitTimer < 0 {
+			c.PlayerHitTimer = 0
+		}
+	}
+	if c.ShakeTimer > 0 {
+		c.ShakeTimer -= dt
+		if c.ShakeTimer < 0 {
+			c.ShakeTimer = 0
+		}
+	}
+}
+
+// PlayerDisplayPos returns the lerped player world position for rendering.
+func (c *Combat) PlayerDisplayPos() (float64, float64) {
+	if c.Player.TweenTimer > 0 {
+		p := 1 - c.Player.TweenTimer/TweenDuration
+		return c.Player.PrevX + (c.Player.X-c.Player.PrevX)*p,
+			c.Player.PrevY + (c.Player.Y-c.Player.PrevY)*p
+	}
+	return c.Player.X, c.Player.Y
+}
+
+// EnemyDisplayPos returns the lerped world position of an enemy.
+func (c *Combat) EnemyDisplayPos(e *enemies.Enemy) (float64, float64) {
+	if e.TweenTimer > 0 {
+		p := 1 - e.TweenTimer/TweenDuration
+		return e.PrevX + (e.X-e.PrevX)*p, e.PrevY + (e.Y-e.PrevY)*p
+	}
+	return e.X, e.Y
+}
+
+// ViewShake returns the current screen-shake offset in pixels.
+func (c *Combat) ViewShake() (float64, float64) {
+	if c.ShakeTimer <= 0 {
+		return 0, 0
+	}
+	t := c.ShakeTimer / ShakeDuration
+	return math.Sin(c.ShakeTimer*55) * ShakeIntensity * t,
+		math.Cos(c.ShakeTimer*73) * ShakeIntensity * t
+}
+
+// animateEnemyMove updates the enemy to a new world position and starts a
+// movement tween for the renderer.
+func (c *Combat) animateEnemyMove(e *enemies.Enemy, newX, newY float64) {
+	e.PrevX = e.X
+	e.PrevY = e.Y
+	e.X = newX
+	e.Y = newY
+	e.TweenTimer = TweenDuration
+}
+
+// animatePlayerMove updates the player to a new world position and starts a
+// player tween. The player always renders at radar center, but enemies/
+// minions/popups read from PlayerDisplayPos so they slide smoothly.
+func (c *Combat) animatePlayerMove(newX, newY float64) {
+	c.Player.PrevX = c.Player.X
+	c.Player.PrevY = c.Player.Y
+	c.Player.X = newX
+	c.Player.Y = newY
+	c.Player.TweenTimer = TweenDuration
 }
 
 func (c *Combat) advancePopups(dt float64) {
@@ -1170,6 +1290,7 @@ func (c *Combat) DamageAll(amount int, dt runes.DamageType, maxRange float64) {
 		if e.HP < 0 {
 			e.HP = 0
 		}
+		e.HitTimer = HitFlashDuration
 		c.Popups = append(c.Popups, DamagePopup{
 			X: e.X, Y: e.Y, Amount: dealt, Type: dt,
 		})

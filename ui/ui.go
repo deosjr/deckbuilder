@@ -94,9 +94,13 @@ var (
 	slowCol        = color.RGBA{240, 200, 90, 255}
 	rangeRingCol   = color.RGBA{180, 130, 220, 110}
 	rangeTargetCol = color.RGBA{255, 200, 130, 220}
-	coneCol        = color.RGBA{120, 220, 255, 18}
-	coneEdgeCol    = color.RGBA{120, 220, 255, 60}
-	predictCol     = color.RGBA{230, 90, 90, 110}
+	coneCol            = color.RGBA{120, 220, 255, 18}
+	coneEdgeCol        = color.RGBA{120, 220, 255, 60}
+	predictCol         = color.RGBA{230, 90, 90, 110}
+	enemyOutOfConeCol  = color.RGBA{140, 70, 70, 210}
+	hitFlashEnemyCol   = color.RGBA{255, 240, 220, 255}
+	hitFlashMinionCol  = color.RGBA{230, 255, 230, 255}
+	hitFlashPlayerCol  = color.RGBA{255, 200, 200, 255}
 
 	logBg          = color.RGBA{16, 18, 26, 220}
 	logEdge        = color.RGBA{70, 80, 110, 255}
@@ -389,6 +393,8 @@ func drawColoredText(screen *ebiten.Image, s string, x, y int, c color.RGBA, alp
 }
 
 func drawPopups(screen *ebiten.Image, c *combat.Combat) {
+	playerDX, playerDY := c.PlayerDisplayPos()
+	sx, sy := c.ViewShake()
 	for _, p := range c.Popups {
 		t := p.Age / combat.PopupLife
 		if t > 1 {
@@ -396,33 +402,45 @@ func drawPopups(screen *ebiten.Image, c *combat.Combat) {
 		}
 		alpha := float32(1.0 - t*t) // ease-out fade
 		dy := -float64(40) * t
-		x := int(float64(RadarCX) + (p.X - c.Player.X))
-		y := int(float64(RadarCY) + (p.Y - c.Player.Y) + dy - 10)
+		x := int(float64(RadarCX) + (p.X - playerDX) + sx)
+		y := int(float64(RadarCY) + (p.Y - playerDY) + dy - 10 + sy)
 		drawColoredText(screen, fmt.Sprintf("%d", p.Amount), x-6, y, damageTypeColor(p.Type), alpha)
 	}
 }
 
 func drawRadar(screen *ebiten.Image, c *combat.Combat) {
+	sx, sy := c.ViewShake()
+	shakeX := float32(sx)
+	shakeY := float32(sy)
+	playerDX, playerDY := c.PlayerDisplayPos()
+
 	vector.DrawFilledCircle(screen, RadarCX, RadarCY, RadarRadius, radarColor, true)
 	for _, r := range []float32{RadarRadius * 0.33, RadarRadius * 0.66, RadarRadius} {
 		vector.StrokeCircle(screen, RadarCX, RadarCY, r, 1, radarRing, true)
 	}
 	drawCone(screen, c)
 	drawMovePreview(screen, c)
-	// player dot + facing tick
-	vector.DrawFilledCircle(screen, RadarCX, RadarCY, 8, playerColor, true)
-	tx := float32(RadarCX) + float32(math.Cos(c.Player.Facing)*16)
-	ty := float32(RadarCY) + float32(math.Sin(c.Player.Facing)*16)
-	vector.StrokeLine(screen, RadarCX, RadarCY, tx, ty, 3, playerColor, true)
+
+	// Player dot + facing tick (flashes when hit; shakes with the world).
+	playerCol := playerColor
+	if c.PlayerHitTimer > 0 {
+		playerCol = hitFlashPlayerCol
+	}
+	pcx := float32(RadarCX) + shakeX
+	pcy := float32(RadarCY) + shakeY
+	vector.DrawFilledCircle(screen, pcx, pcy, 8, playerCol, true)
+	tx := pcx + float32(math.Cos(c.Player.Facing)*16)
+	ty := pcy + float32(math.Sin(c.Player.Facing)*16)
+	vector.StrokeLine(screen, pcx, pcy, tx, ty, 3, playerCol, true)
 
 	for _, w := range c.Walls {
 		if w.HP <= 0 {
 			continue
 		}
-		x1 := float32(RadarCX + (w.X1 - c.Player.X))
-		y1 := float32(RadarCY + (w.Y1 - c.Player.Y))
-		x2 := float32(RadarCX + (w.X2 - c.Player.X))
-		y2 := float32(RadarCY + (w.Y2 - c.Player.Y))
+		x1 := float32(RadarCX+(w.X1-playerDX)) + shakeX
+		y1 := float32(RadarCY+(w.Y1-playerDY)) + shakeY
+		x2 := float32(RadarCX+(w.X2-playerDX)) + shakeX
+		y2 := float32(RadarCY+(w.Y2-playerDY)) + shakeY
 		vector.StrokeLine(screen, x1, y1, x2, y2, 5, wallCol, true)
 		mx := int((x1 + x2) / 2)
 		my := int((y1 + y2) / 2)
@@ -430,21 +448,27 @@ func drawRadar(screen *ebiten.Image, c *combat.Combat) {
 	}
 
 	for _, e := range c.Enemies {
+		ewx, ewy := c.EnemyDisplayPos(e)
+		ex := float32(RadarCX+(ewx-playerDX)) + shakeX
+		ey := float32(RadarCY+(ewy-playerDY)) + shakeY
+
 		if e.HP > 0 {
 			if px, py, moves := c.PredictMove(e); moves {
-				ex := float32(RadarCX + (e.X - c.Player.X))
-				ey := float32(RadarCY + (e.Y - c.Player.Y))
-				gx := float32(RadarCX + (px - c.Player.X))
-				gy := float32(RadarCY + (py - c.Player.Y))
+				gx := float32(RadarCX+(px-playerDX)) + shakeX
+				gy := float32(RadarCY+(py-playerDY)) + shakeY
 				vector.StrokeLine(screen, ex, ey, gx, gy, 1, predictCol, true)
 				vector.StrokeCircle(screen, gx, gy, 9, 1, predictCol, true)
 			}
 		}
-		ex := float32(RadarCX + (e.X - c.Player.X))
-		ey := float32(RadarCY + (e.Y - c.Player.Y))
+
 		col := enemyColor
-		if e.HP <= 0 {
+		switch {
+		case e.HP <= 0:
 			col = enemyDeadCol
+		case e.HitTimer > 0:
+			col = hitFlashEnemyCol
+		case !inConePreview(c, e.X, e.Y):
+			col = enemyOutOfConeCol
 		}
 		vector.DrawFilledCircle(screen, ex, ey, 10, col, true)
 		label := fmt.Sprintf("%s %d/%d", e.Name, e.HP, e.MaxHP)
@@ -458,9 +482,13 @@ func drawRadar(screen *ebiten.Image, c *combat.Combat) {
 		if m.HP <= 0 {
 			continue
 		}
-		mx := float32(RadarCX + (m.X - c.Player.X))
-		my := float32(RadarCY + (m.Y - c.Player.Y))
-		vector.DrawFilledCircle(screen, mx, my, 7, minionCol, true)
+		mx := float32(RadarCX+(m.X-playerDX)) + shakeX
+		my := float32(RadarCY+(m.Y-playerDY)) + shakeY
+		minionDrawCol := minionCol
+		if m.HitTimer > 0 {
+			minionDrawCol = hitFlashMinionCol
+		}
+		vector.DrawFilledCircle(screen, mx, my, 7, minionDrawCol, true)
 		label := fmt.Sprintf("M %d/%d  (%d/t)", m.HP, m.MaxHP, m.AttackPower)
 		drawText(screen, label, int(mx)-32, int(my)+10, faceSmall, minionCol)
 	}

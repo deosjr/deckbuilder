@@ -5,7 +5,7 @@ import "deckbuilder/runes"
 type Enemy struct {
 	Name        string
 	HP, MaxHP   int
-	X, Y        float64 // radar position; player is at (0,0)
+	X, Y        float64 // world position
 	MeleeRange  float64
 	MoveSpeed   float64
 	AttackPower int
@@ -15,6 +15,11 @@ type Enemy struct {
 	Stunned     int              // turns remaining where the enemy skips its action
 	Weakness    runes.DamageType // hidden from the player
 	Intent      string           // human-readable next action
+
+	// --- visual-only state (driven by combat, read by ui) ---
+	PrevX, PrevY float64 // previous world position, for movement tweening
+	TweenTimer   float64 // seconds remaining in the move tween
+	HitTimer     float64 // seconds remaining in the damage flash
 }
 
 func NewGoblin(x, y float64) *Enemy {
