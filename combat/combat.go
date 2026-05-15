@@ -39,32 +39,6 @@ type DamagePopup struct {
 
 const PopupLife = 1.1
 
-// Particle is a short-lived spark spawned by combat events (mostly damage).
-// Stored in world coordinates; UI reads directly.
-type Particle struct {
-	X, Y          float64
-	VX, VY        float64
-	Life, MaxLife float64
-	R, G, B       uint8
-	Size          float32
-}
-
-const MaxParticles = 200
-
-// Beam is a short-lived line from a caster to a target, used to visualise
-// spell impact. Stored in world coordinates.
-type Beam struct {
-	X1, Y1, X2, Y2 float64
-	R, G, B        uint8
-	Life, MaxLife  float64
-}
-
-const BeamLife = 0.35
-
-// CastPulseDuration is how long the expanding ring around the player lasts
-// after a spell is cast or a dash is taken.
-const CastPulseDuration = 0.40
-
 // Minion is a Necromancer-summoned process that occupies a world position and
 // runs an embedded program every turn (currently: damage nearest enemy).
 type Minion struct {
@@ -168,17 +142,11 @@ type Combat struct {
 	Log   []LogEntry
 	actor string // name of the entity currently producing log entries
 
-	Popups    []DamagePopup
-	Particles []Particle
-	Beams     []Beam
+	Popups []DamagePopup
 
 	// Visual feedback state. Read by UI, advanced in Update.
-	PlayerHitTimer  float64
-	ShakeTimer      float64
-	CastPulseTimer  float64
-	CastPulseR      uint8
-	CastPulseG      uint8
-	CastPulseB      uint8
+	PlayerHitTimer float64
+	ShakeTimer     float64
 
 	// PendingCardIdx is the hand index of a card awaiting placement target.
 	// -1 when no card is pending. While >= 0, other input is blocked.
@@ -337,11 +305,6 @@ func (c *Combat) runMinionPrograms() {
 		c.Popups = append(c.Popups, DamagePopup{
 			X: target.X, Y: target.Y, Amount: dealt, Type: runes.Physical,
 		})
-		burst := 5
-		if target.HP == 0 {
-			burst = 14
-		}
-		c.SpawnDamageParticles(target.X, target.Y, runes.Physical, burst)
 		if target.HP == 0 {
 			c.addLog(LogMinion, "Minion slays %s (%d dmg)", target.Name, dealt)
 		} else {
@@ -476,7 +439,6 @@ func (c *Combat) Dash() bool {
 	c.Dashed = true
 	c.SpellCast = true
 	c.addLog(LogPlayer, "Dash (+%d movement, no spell)", int(BaseMovement))
-	c.triggerCastPulse(240, 220, 120) // warm yellow pulse for dash
 	return true
 }
 
@@ -527,7 +489,6 @@ func (c *Combat) CastSpell() bool {
 		verb = "Slow cast (after enemy turn)"
 	}
 	c.addLog(LogPlayer, "%s: %s", verb, strings.Join(names, " + "))
-	c.triggerCastPulse(200, 180, 230)
 
 	if c.StageIsSlow() {
 		c.pendingSlowSpell = append(c.pendingSlowSpell[:0], c.Stage...)
@@ -693,8 +654,6 @@ func (c *Combat) EndTurn() {
 // Update advances the enemy phase animation. dt is seconds.
 func (c *Combat) Update(dt float64) {
 	c.advancePopups(dt)
-	c.advanceParticles(dt)
-	c.advanceBeams(dt)
 	c.advanceVisualTimers(dt)
 	if c.Phase != PhaseEnemy {
 		return
@@ -786,7 +745,6 @@ func (c *Combat) runEnemyProgram(e *enemies.Enemy) {
 			c.Popups = append(c.Popups, DamagePopup{
 				X: t.x, Y: t.y, Amount: dmg, Type: dt,
 			})
-			c.SpawnDamageParticles(t.x, t.y, dt, 6)
 			if t.minion.HP == 0 {
 				c.addLog(LogEnemy, "%s destroys a minion (%d %s)", e.Name, dmg, dt)
 			} else {
@@ -1180,12 +1138,6 @@ func (c *Combat) DamageNearest(amount int, dt runes.DamageType, maxRange float64
 	c.Popups = append(c.Popups, DamagePopup{
 		X: target.X, Y: target.Y, Amount: dealt, Type: dt,
 	})
-	c.SpawnBeam(c.Player.X, c.Player.Y, target.X, target.Y, dt)
-	burst := 6
-	if target.HP == 0 {
-		burst = 16
-	}
-	c.SpawnDamageParticles(target.X, target.Y, dt, burst)
 	weakNote := ""
 	if weak {
 		weakNote = " (weak)"
@@ -1248,46 +1200,6 @@ func (c *Combat) advanceVisualTimers(dt float64) {
 			c.ShakeTimer = 0
 		}
 	}
-	if c.CastPulseTimer > 0 {
-		c.CastPulseTimer -= dt
-		if c.CastPulseTimer < 0 {
-			c.CastPulseTimer = 0
-		}
-	}
-}
-
-// SpawnBeam adds a fading line from (x1,y1) to (x2,y2), colored by the
-// damage type. Used to visualise spell hits flying from the caster.
-func (c *Combat) SpawnBeam(x1, y1, x2, y2 float64, dt runes.DamageType) {
-	r, g, b := particleColorFor(dt)
-	c.Beams = append(c.Beams, Beam{
-		X1: x1, Y1: y1, X2: x2, Y2: y2,
-		R: r, G: g, B: b,
-		Life: BeamLife, MaxLife: BeamLife,
-	})
-}
-
-func (c *Combat) advanceBeams(dt float64) {
-	if len(c.Beams) == 0 {
-		return
-	}
-	out := c.Beams[:0]
-	for _, b := range c.Beams {
-		b.Life -= dt
-		if b.Life > 0 {
-			out = append(out, b)
-		}
-	}
-	c.Beams = out
-}
-
-// triggerCastPulse starts the expanding ring around the player with the
-// given color, replacing any in-flight pulse.
-func (c *Combat) triggerCastPulse(r, g, b uint8) {
-	c.CastPulseTimer = CastPulseDuration
-	c.CastPulseR = r
-	c.CastPulseG = g
-	c.CastPulseB = b
 }
 
 // PlayerDisplayPos returns the lerped player world position for rendering.
@@ -1340,58 +1252,6 @@ func (c *Combat) animatePlayerMove(newX, newY float64) {
 	c.Player.TweenTimer = TweenDuration
 }
 
-// SpawnDamageParticles emits a small burst of damage-type-colored particles
-// at the world position (x, y). count controls the spark count.
-func (c *Combat) SpawnDamageParticles(x, y float64, dt runes.DamageType, count int) {
-	r, g, b := particleColorFor(dt)
-	for i := 0; i < count; i++ {
-		ang := c.rng.Float64() * math.Pi * 2
-		speed := c.rng.Float64()*70 + 30
-		life := c.rng.Float64()*0.4 + 0.45
-		c.Particles = append(c.Particles, Particle{
-			X: x, Y: y,
-			VX:   math.Cos(ang) * speed,
-			VY:   math.Sin(ang) * speed,
-			Life: life, MaxLife: life,
-			R: r, G: g, B: b,
-			Size: float32(c.rng.Float64()*1.5 + 1.2),
-		})
-	}
-	if len(c.Particles) > MaxParticles {
-		c.Particles = c.Particles[len(c.Particles)-MaxParticles:]
-	}
-}
-
-func particleColorFor(dt runes.DamageType) (uint8, uint8, uint8) {
-	switch dt {
-	case runes.Fire:
-		return 255, 150, 70
-	case runes.Frost:
-		return 120, 200, 255
-	default:
-		return 230, 230, 230
-	}
-}
-
-func (c *Combat) advanceParticles(dt float64) {
-	if len(c.Particles) == 0 {
-		return
-	}
-	out := c.Particles[:0]
-	for _, p := range c.Particles {
-		p.X += p.VX * dt
-		p.Y += p.VY * dt
-		// drag
-		p.VX *= 0.90
-		p.VY *= 0.90
-		p.Life -= dt
-		if p.Life > 0 {
-			out = append(out, p)
-		}
-	}
-	c.Particles = out
-}
-
 func (c *Combat) advancePopups(dt float64) {
 	if len(c.Popups) == 0 {
 		return
@@ -1434,12 +1294,6 @@ func (c *Combat) DamageAll(amount int, dt runes.DamageType, maxRange float64) {
 		c.Popups = append(c.Popups, DamagePopup{
 			X: e.X, Y: e.Y, Amount: dealt, Type: dt,
 		})
-		c.SpawnBeam(c.Player.X, c.Player.Y, e.X, e.Y, dt)
-		burst := 5
-		if e.HP == 0 {
-			burst = 14
-		}
-		c.SpawnDamageParticles(e.X, e.Y, dt, burst)
 		hits++
 		weakNote := ""
 		if weak {
